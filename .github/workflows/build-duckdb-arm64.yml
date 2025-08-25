@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-duckdb-windows-arm64:
-    runs-on: windows-11-arm
+    runs-on: windows-latest
     
     steps:
     - name: Checkout repository
@@ -28,7 +28,7 @@ jobs:
       
     - name: Clone DuckDB
       run: |
-        git clone --depth 1 --branch v1.1.3 https://github.com/duckdb/duckdb.git
+        git clone --depth 1 --branch v1.3.2 https://github.com/duckdb/duckdb.git
         
     - name: Clone DuckDB Go Bindings
       run: |
@@ -39,7 +39,7 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF ..
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
         
     - name: Build DuckDB
       working-directory: duckdb/build
@@ -82,7 +82,7 @@ jobs:
       run: |
         mkdir build-static
         cd build-static
-        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF ..
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
         cmake --build . --config Release --parallel 2
         
     - name: Build Go Bindings (Static)
@@ -212,7 +212,7 @@ jobs:
            ```
         
         Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
-        DuckDB Version: 1.1.3
+        DuckDB Version: 1.3.2
         Go Bindings: Latest from main branch
         "@ | Out-File -FilePath release-package/README.md -Encoding utf8
         
