@@ -9,7 +9,6 @@ on:
 
 jobs:
   build-duckdb-windows-arm64:
-    # Use the Windows-on-ARM hosted runner
     runs-on: windows-11-arm
 
     steps:
@@ -35,20 +34,38 @@ jobs:
       run: |
         git clone https://github.com/duckdb/duckdb-go-bindings.git
 
+    - name: Patch re2 CMake minimum (fix CMake < 3.5 compatibility)
+      working-directory: duckdb
+      shell: powershell
+      run: |
+        $file = "third_party/re2/CMakeLists.txt"
+        if (Test-Path $file) {
+          (Get-Content -Raw $file) -replace 'cmake_minimum_required\s*\(\s*VERSION\s*[0-9]+(\.[0-9]+)*\s*\)', 'cmake_minimum_required(VERSION 3.5)' | Set-Content $file -Encoding UTF8
+          Write-Host "Patched $file -> cmake_minimum_required(VERSION 3.5)"
+        } else {
+          Write-Host "No re2 CMakeLists at $file — skipping patch"
+        }
+
     - name: Configure DuckDB (shared, ARM64)
       working-directory: duckdb
+      shell: powershell
       run: |
         mkdir -Force build
         cd build
-        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF -DDUCKDB_EXTENSION_CONFIGS="" -DBUILD_EXTENSIONS="" ..
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=ON -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF `
+          -DDUCKDB_EXTENSION_CONFIGS="" -DBUILD_EXTENSIONS="" `
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
 
     - name: Build DuckDB (shared)
       working-directory: duckdb/build
+      shell: powershell
       run: |
         cmake --build . --config Release --parallel 2
 
     - name: Verify DuckDB Build (shared)
       working-directory: duckdb/build/src/Release
+      shell: powershell
       run: |
         dir
         if (!(Test-Path "duckdb.dll")) { throw "DuckDB DLL not found" }
@@ -60,7 +77,7 @@ jobs:
         CGO_ENABLED: '1'
         GOOS: windows
         GOARCH: arm64
-        # MSVC-compatible include path
+        # MSVC-compatible include path and linker path (use double-backslashes)
         CGO_CFLAGS: '-I"${{ github.workspace }}\\duckdb\\src\\include"'
         CGO_LDFLAGS: '-L"${{ github.workspace }}\\duckdb\\build\\src\\Release" -lduckdb'
         PATH: ${{ github.workspace }}\\duckdb\\build\\src\\Release;${{ env.PATH }}
@@ -82,10 +99,14 @@ jobs:
 
     - name: Configure DuckDB (static, ARM64)
       working-directory: duckdb
+      shell: powershell
       run: |
         mkdir -Force build-static
         cd build-static
-        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF -DDUCKDB_EXTENSION_CONFIGS="" -DBUILD_EXTENSIONS="" ..
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF `
+          -DDUCKDB_EXTENSION_CONFIGS="" -DBUILD_EXTENSIONS="" `
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
         cmake --build . --config Release --parallel 2
 
     - name: Build Go Bindings (static)
@@ -94,11 +115,9 @@ jobs:
         CGO_ENABLED: '1'
         GOOS: windows
         GOARCH: arm64
-        # Static build define; link against the static duckdb.lib produced by MSVC/CMake
         CGO_CFLAGS: '-I"${{ github.workspace }}\\duckdb\\src\\include" -DDUCKDB_STATIC_BUILD'
         CGO_LDFLAGS: '-L"${{ github.workspace }}\\duckdb\\build-static\\src\\Release" -lduckdb -lws2_32'
       run: |
-        # duckdb_go_bindings may use a build tag to switch to static usage
         go build -tags=duckdb_use_static_lib -v ./...
 
     - name: Create Test Application
@@ -135,6 +154,7 @@ jobs:
         $code | Out-File -FilePath test-duckdb.go -Encoding utf8
 
     - name: Build Test App (dynamic)
+      shell: powershell
       env:
         CGO_ENABLED: '1'
         GOOS: windows
@@ -148,6 +168,7 @@ jobs:
         go build -o test-duckdb-dynamic.exe test-duckdb.go
 
     - name: Build Test App (static)
+      shell: powershell
       env:
         CGO_ENABLED: '1'
         GOOS: windows
@@ -164,9 +185,17 @@ jobs:
 
         # DuckDB binaries
         mkdir -Force release-package\\duckdb-binaries
-        copy duckdb\\build\\src\\Release\\duckdb.dll release-package\\duckdb-binaries\\ || echo "dll copy skipped (maybe static-only build)"
-        copy duckdb\\build\\src\\Release\\duckdb.lib release-package\\duckdb-binaries\\ || echo "shared lib copy skipped"
-        copy duckdb\\build-static\\src\\Release\\duckdb.lib release-package\\duckdb-binaries\\duckdb-static.lib || echo "static lib copy skipped"
+        if (Test-Path "duckdb\\build\\src\\Release\\duckdb.dll") {
+          copy duckdb\\build\\src\\Release\\duckdb.dll release-package\\duckdb-binaries\\
+        } else { Write-Host "duckdb.dll not found; skipping" }
+
+        if (Test-Path "duckdb\\build\\src\\Release\\duckdb.lib") {
+          copy duckdb\\build\\src\\Release\\duckdb.lib release-package\\duckdb-binaries\\
+        } else { Write-Host "duckdb import lib not found; skipping" }
+
+        if (Test-Path "duckdb\\build-static\\src\\Release\\duckdb.lib") {
+          copy duckdb\\build-static\\src\\Release\\duckdb.lib release-package\\duckdb-binaries\\duckdb-static.lib
+        } else { Write-Host "duckdb static lib not found; skipping" }
 
         # Headers
         mkdir -Force release-package\\include
@@ -177,8 +206,8 @@ jobs:
         xcopy /E /I duckdb-go-bindings release-package\\go-bindings
 
         # Test applications
-        copy test-duckdb-dynamic.exe release-package\\ || echo "dynamic test exe not present"
-        copy test-duckdb-static.exe release-package\\ || echo "static test exe not present"
+        if (Test-Path "test-duckdb-dynamic.exe") { copy test-duckdb-dynamic.exe release-package\\ } else { Write-Host "dynamic test exe not present" }
+        if (Test-Path "test-duckdb-static.exe") { copy test-duckdb-static.exe release-package\\ } else { Write-Host "static test exe not present" }
         copy test-duckdb.go release-package\\
 
         # Create README
