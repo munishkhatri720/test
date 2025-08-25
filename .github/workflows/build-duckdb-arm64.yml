@@ -1,0 +1,243 @@
+name: Build DuckDB Go Bindings for Windows ARM64
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  build-duckdb-windows-arm64:
+    runs-on: windows-11-arm
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: lukka/get-cmake@latest
+      
+    - name: Clone DuckDB
+      run: |
+        git clone --depth 1 --branch v1.1.3 https://github.com/duckdb/duckdb.git
+        
+    - name: Clone DuckDB Go Bindings
+      run: |
+        git clone https://github.com/duckdb/duckdb-go-bindings.git
+        
+    - name: Configure DuckDB for ARM64
+      working-directory: duckdb
+      run: |
+        mkdir build
+        cd build
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF ..
+        
+    - name: Build DuckDB
+      working-directory: duckdb/build
+      run: |
+        cmake --build . --config Release --parallel 2
+        
+    - name: Verify DuckDB Build
+      working-directory: duckdb/build/src/Release
+      run: |
+        dir
+        if (!(Test-Path "duckdb.dll")) { throw "DuckDB DLL not found" }
+        if (!(Test-Path "duckdb.lib")) { throw "DuckDB LIB not found" }
+        
+    - name: Build Go Bindings (Dynamic)
+      working-directory: duckdb-go-bindings
+      env:
+        CGO_ENABLED: 1
+        GOOS: windows
+        GOARCH: arm64
+        CGO_CFLAGS: -I${{ github.workspace }}/duckdb/src/include
+        CGO_LDFLAGS: -L${{ github.workspace }}/duckdb/build/src/Release -lduckdb
+      run: |
+        go mod tidy
+        go build -v ./...
+        
+    - name: Test Go Bindings (Dynamic)
+      working-directory: duckdb-go-bindings
+      env:
+        CGO_ENABLED: 1
+        GOOS: windows
+        GOARCH: arm64
+        CGO_CFLAGS: -I${{ github.workspace }}/duckdb/src/include
+        CGO_LDFLAGS: -L${{ github.workspace }}/duckdb/build/src/Release -lduckdb
+        PATH: ${{ github.workspace }}/duckdb/build/src/Release;${{ env.PATH }}
+      run: |
+        go test -v -short ./...
+        
+    - name: Build Static DuckDB
+      working-directory: duckdb
+      run: |
+        mkdir build-static
+        cd build-static
+        cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF ..
+        cmake --build . --config Release --parallel 2
+        
+    - name: Build Go Bindings (Static)
+      working-directory: duckdb-go-bindings
+      env:
+        CGO_ENABLED: 1
+        GOOS: windows
+        GOARCH: arm64
+        CGO_CFLAGS: -I${{ github.workspace }}/duckdb/src/include -DDUCKDB_STATIC_BUILD
+        CGO_LDFLAGS: -L${{ github.workspace }}/duckdb/build-static/src/Release -lduckdb -lws2_32 -lwsock32 -lrstrtmgr -static-libgcc -static-libstdc++
+      run: |
+        go build -tags=duckdb_use_static_lib -v ./...
+        
+    - name: Create Test Application
+      run: |
+        @"
+        package main
+        
+        import (
+            "database/sql"
+            "fmt"
+            "log"
+        
+            _ "github.com/duckdb/duckdb-go-bindings"
+        )
+        
+        func main() {
+            db, err := sql.Open("duckdb", "")
+            if err != nil {
+                log.Fatal(err)
+            }
+            defer db.Close()
+        
+            var version string
+            err = db.QueryRow("SELECT version()").Scan(&version)
+            if err != nil {
+                log.Fatal(err)
+            }
+        
+            fmt.Printf("DuckDB Version: %s\n", version)
+            fmt.Println("Windows ARM64 build successful!")
+        }
+        "@ | Out-File -FilePath test-duckdb.go -Encoding utf8
+        
+    - name: Build Test Application (Dynamic)
+      env:
+        CGO_ENABLED: 1
+        GOOS: windows
+        GOARCH: arm64
+        CGO_CFLAGS: -I${{ github.workspace }}/duckdb/src/include
+        CGO_LDFLAGS: -L${{ github.workspace }}/duckdb/build/src/Release -lduckdb
+      run: |
+        go mod init duckdb-test
+        go get github.com/duckdb/duckdb-go-bindings
+        go build -o test-duckdb-dynamic.exe test-duckdb.go
+        
+    - name: Build Test Application (Static)
+      env:
+        CGO_ENABLED: 1
+        GOOS: windows
+        GOARCH: arm64
+        CGO_CFLAGS: -I${{ github.workspace }}/duckdb/src/include -DDUCKDB_STATIC_BUILD
+        CGO_LDFLAGS: -L${{ github.workspace }}/duckdb/build-static/src/Release -lduckdb -lws2_32 -lwsock32 -lrstrtmgr -static-libgcc -static-libstdc++
+      run: |
+        go build -tags=duckdb_use_static_lib -o test-duckdb-static.exe test-duckdb.go
+        
+    - name: Package Release Artifacts
+      run: |
+        mkdir release-package
+        
+        # DuckDB binaries
+        mkdir release-package/duckdb-binaries
+        copy duckdb/build/src/Release/duckdb.dll release-package/duckdb-binaries/
+        copy duckdb/build/src/Release/duckdb.lib release-package/duckdb-binaries/
+        copy duckdb/build-static/src/Release/duckdb.lib release-package/duckdb-binaries/duckdb-static.lib
+        
+        # Headers
+        mkdir release-package/include
+        xcopy /E /I duckdb/src/include release-package/include
+        
+        # Go bindings source
+        mkdir release-package/go-bindings
+        xcopy /E /I duckdb-go-bindings release-package/go-bindings
+        
+        # Test applications
+        copy test-duckdb-dynamic.exe release-package/
+        copy test-duckdb-static.exe release-package/
+        copy test-duckdb.go release-package/
+        
+        # Create usage instructions
+        @"
+        # DuckDB Go Bindings for Windows ARM64
+        
+        This package contains pre-built DuckDB binaries and Go bindings for Windows ARM64.
+        
+        ## Contents:
+        - duckdb-binaries/: DuckDB library files
+        - include/: DuckDB header files  
+        - go-bindings/: Go binding source code
+        - test-duckdb-static.exe: Self-contained test application
+        - test-duckdb-dynamic.exe: Test application requiring DuckDB DLL
+        
+        ## Quick Test:
+        Run test-duckdb-static.exe to verify everything works.
+        
+        ## Using in Your Go Project:
+        
+        ### Method 1: Use local go-bindings
+        1. Copy the go-bindings folder to your project
+        2. In your go.mod, add: replace github.com/duckdb/duckdb-go-bindings => ./go-bindings
+        3. Set environment variables before building:
+           ```
+           set CGO_ENABLED=1
+           set CGO_CFLAGS=-I/path/to/include -DDUCKDB_STATIC_BUILD  
+           set CGO_LDFLAGS=-L/path/to/duckdb-binaries -lduckdb -lws2_32 -lwsock32 -lrstrtmgr -static-libgcc -static-libstdc++
+           go build -tags=duckdb_use_static_lib
+           ```
+        
+        ### Method 2: Dynamic linking
+        1. Place duckdb.dll in your PATH or next to your executable
+        2. Set environment variables:
+           ```
+           set CGO_ENABLED=1
+           set CGO_CFLAGS=-I/path/to/include
+           set CGO_LDFLAGS=-L/path/to/duckdb-binaries -lduckdb
+           go build
+           ```
+        
+        Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
+        DuckDB Version: 1.1.3
+        Go Bindings: Latest from main branch
+        "@ | Out-File -FilePath release-package/README.md -Encoding utf8
+        
+    - name: Upload Release Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: duckdb-windows-arm64-complete
+        path: release-package/
+        retention-days: 30
+        
+    - name: Upload DuckDB Binaries Only  
+      uses: actions/upload-artifact@v4
+      with:
+        name: duckdb-binaries-windows-arm64
+        path: |
+          duckdb/build/src/Release/duckdb.dll
+          duckdb/build/src/Release/duckdb.lib
+          duckdb/build-static/src/Release/duckdb.lib
+        retention-days: 30
+        
+    - name: Upload Test Applications
+      uses: actions/upload-artifact@v4
+      with:
+        name: duckdb-test-apps-windows-arm64
+        path: |
+          test-duckdb-static.exe
+          test-duckdb-dynamic.exe
+        retention-days: 30
